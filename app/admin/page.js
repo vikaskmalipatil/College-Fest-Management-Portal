@@ -9,7 +9,8 @@ import {
   addDoc,
   query,
   where,
-  orderBy
+  orderBy,
+  serverTimestamp
 } from "firebase/firestore";
 import { onAuthStateChanged, signOut } from "firebase/auth";
 import { db, auth } from "@/lib/firebase";
@@ -18,10 +19,11 @@ import { useRouter } from "next/navigation";
 export default function AdminDashboard() {
   const router = useRouter();
 
+  // ================== STATES ==================
   const [allEvents, setAllEvents] = useState([]);
-  const [branch, setBranch] = useState("");
-  const [filteredEvents, setFilteredEvents] = useState([]);
+  const [branchFilter, setBranchFilter] = useState("ALL");
   const [editId, setEditId] = useState(null);
+  const [loading, setLoading] = useState(false);
 
   const [newEvent, setNewEvent] = useState({
     title: "",
@@ -35,246 +37,297 @@ export default function AdminDashboard() {
   const [registrationsMap, setRegistrationsMap] = useState({});
   const [loadingRegsFor, setLoadingRegsFor] = useState("");
 
+  const [students, setStudents] = useState([]);
+  const [showStudents, setShowStudents] = useState(false);
+  const [studentsLoading, setStudentsLoading] = useState(false);
+
+  // ================== AUTH PROTECT ==================
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (user) => {
-      if (!user) router.push("/admin-login");
+      if (!user) router.replace("/admin-login");
     });
     return () => unsub();
   }, [router]);
 
+  // ================== DATA FETCHING ==================
   const fetchEvents = async () => {
-    const snap = await getDocs(collection(db, "events"));
-    setAllEvents(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    setLoading(true);
+    try {
+      const snap = await getDocs(collection(db, "events"));
+      setAllEvents(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    } catch (err) {
+      console.error("Fetch events error:", err);
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => {
     fetchEvents();
   }, []);
 
-  useEffect(() => {
-    if (!branch) {
-      setFilteredEvents([]);
-      return;
+  const fetchStudents = async () => {
+    setStudentsLoading(true);
+    try {
+      const q = query(
+        collection(db, "users"),
+        where("role", "==", "student")
+      );
+      const snap = await getDocs(q);
+      setStudents(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    } catch (err) {
+      console.error("Fetch students error:", err);
+    } finally {
+      setStudentsLoading(false);
     }
-    const b = branch.toUpperCase();
-    setFilteredEvents(allEvents.filter(e => (e.branch || "").toUpperCase() === b));
-  }, [branch, allEvents]);
+  };
 
-  const addEvent = async () => {
-    if (!newEvent.title || !newEvent.branch) return alert("Title & branch required");
-    await addDoc(collection(db, "events"), { ...newEvent, branch: newEvent.branch.toUpperCase(), createdAt: new Date().toISOString() });
-    setNewEvent({ title: "", description: "", date: "", time: "", venue: "", branch: "" });
+  // ================== EVENT HANDLERS ==================
+  const handleInputChange = (e) => {
+    const { name, value } = e.target;
+    setNewEvent(prev => ({ ...prev, [name]: value }));
+  };
+
+  const addEvent = async (e) => {
+    e.preventDefault();
+    if (!newEvent.title || !newEvent.branch) return alert("Title & Branch required");
+
+    await addDoc(collection(db, "events"), {
+      ...newEvent,
+      branch: newEvent.branch.toUpperCase(),
+      createdAt: serverTimestamp()
+    });
+
+    resetForm();
     fetchEvents();
-    alert("Event added");
+    alert("Event created successfully");
   };
 
   const startEdit = (ev) => {
     setEditId(ev.id);
-    setNewEvent({ title: ev.title, description: ev.description, date: ev.date, time: ev.time, venue: ev.venue, branch: ev.branch });
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+    setNewEvent(ev);
+    window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
   const updateEvent = async () => {
-    await updateDoc(doc(db, "events", editId), { ...newEvent, branch: newEvent.branch.toUpperCase() });
-    setEditId(null);
-    setNewEvent({ title: "", description: "", date: "", time: "", venue: "", branch: "" });
+    await updateDoc(doc(db, "events", editId), {
+      ...newEvent,
+      branch: newEvent.branch.toUpperCase()
+    });
+    resetForm();
     fetchEvents();
   };
 
   const deleteEvent = async (id) => {
-    if (!confirm("Delete this event?")) return;
+    if (!confirm("Are you sure you want to delete this event?")) return;
     await deleteDoc(doc(db, "events", id));
     fetchEvents();
   };
 
+  const resetForm = () => {
+    setEditId(null);
+    setNewEvent({ title: "", description: "", date: "", time: "", venue: "", branch: "" });
+  };
+
   const viewRegistrations = async (eventId) => {
+    if (registrationsMap[eventId]) {
+        setRegistrationsMap(prev => {
+            const newMap = {...prev};
+            delete newMap[eventId];
+            return newMap;
+        });
+        return;
+    }
+    
     setLoadingRegsFor(eventId);
     try {
-      const q = query(collection(db, "registrations"), where("eventId", "==", eventId), orderBy("createdAt", "desc"));
+      const q = query(collection(db, "registrations"), where("eventId", "==", eventId));
       const snap = await getDocs(q);
-      const regs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-      setRegistrationsMap(prev => ({ ...prev, [eventId]: regs }));
-    } catch (err) {
-      console.error("viewRegs error:", err);
-      try {
-        const q2 = query(collection(db, "registrations"), where("eventId", "==", eventId));
-        const snap2 = await getDocs(q2);
-        const regs2 = snap2.docs.map(d => ({ id: d.id, ...d.data() }));
-        setRegistrationsMap(prev => ({ ...prev, [eventId]: regs2 }));
-      } catch (err2) {
-        console.error("fallback viewRegs error:", err2);
-      }
+      setRegistrationsMap(prev => ({
+        ...prev,
+        [eventId]: snap.docs.map(d => ({ id: d.id, ...d.data() }))
+      }));
     } finally {
       setLoadingRegsFor("");
     }
   };
 
-  const logout = async () => {
-    await signOut(auth);
-    router.push("/admin-login");
-  };
+  const filteredEvents = branchFilter === "ALL" 
+    ? allEvents 
+    : allEvents.filter(e => (e.branch || "").toUpperCase() === branchFilter.toUpperCase());
 
   return (
-    <div className="min-h-screen bg-gray-50 text-slate-900 font-sans selection:bg-indigo-100">
-      {/* Navbar */}
-      <nav className="sticky top-0 z-50 bg-white/80 backdrop-blur-md border-b border-gray-200 px-6 py-4 flex justify-between items-center shadow-sm">
-        <h1 className="text-xl font-black tracking-tight text-indigo-600">
-          CAMPUS<span className="text-slate-400 font-light">FEST</span> <span className="text-[10px] bg-indigo-50 text-indigo-600 px-2 py-0.5 rounded ml-2 border border-indigo-100">ADMIN</span>
-        </h1>
-        <button 
-          onClick={logout}
-          className="text-sm font-semibold text-slate-600 hover:text-red-600 transition-colors px-4 py-2 rounded-lg hover:bg-red-50"
-        >
-          Sign Out
-        </button>
-      </nav>
-
-      <main className="max-w-5xl mx-auto p-6 lg:py-12 space-y-10">
+    <div className="min-h-screen bg-slate-50 p-4 md:p-8 font-sans text-slate-900">
+      <div className="max-w-6xl mx-auto space-y-8">
         
-        {/* Form Card */}
-        <section className="bg-white rounded-3xl border border-gray-200 shadow-xl shadow-gray-200/50 overflow-hidden">
-          <div className="bg-indigo-600 px-8 py-4">
-            <h2 className="text-white font-bold flex items-center gap-2">
-              {editId ? "✨ Update Event Details" : "➕ Create New Event"}
-            </h2>
+        {/* HEADER */}
+        <header className="flex justify-between items-center bg-white p-6 rounded-3xl shadow-sm border border-slate-200">
+          <div>
+            <h1 className="text-2xl font-black text-indigo-600 tracking-tighter">ADMIN DASHBOARD</h1>
+            <p className="text-slate-500 text-sm font-medium">Manage College Fest 2025</p>
           </div>
+          <button 
+            onClick={async () => { await signOut(auth); router.replace("/admin-login"); }}
+            className="px-5 py-2 bg-red-50 text-red-600 rounded-xl font-bold text-sm hover:bg-red-100 transition-colors"
+          >
+            Logout
+          </button>
+        </header>
+
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
           
-          <div className="p-8 grid grid-cols-1 md:grid-cols-2 gap-6">
-            <div className="space-y-4">
-              <div>
-                <label className="text-xs font-bold text-slate-400 uppercase mb-1 block">General Info</label>
-                <input 
-                  className="w-full bg-gray-50 border border-gray-200 focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 rounded-xl px-4 py-3 outline-none transition-all"
-                  placeholder="Event Title" 
-                  value={newEvent.title} 
-                  onChange={e=>setNewEvent({...newEvent, title:e.target.value})} 
-                />
-              </div>
-              <textarea 
-                className="w-full bg-gray-50 border border-gray-200 focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 rounded-xl px-4 py-3 outline-none transition-all min-h-[100px]"
-                placeholder="Description" 
-                value={newEvent.description} 
-                onChange={e=>setNewEvent({...newEvent, description:e.target.value})} 
-              />
-              <input 
-                className="w-full bg-gray-50 border border-gray-200 focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 rounded-xl px-4 py-3 outline-none transition-all"
-                placeholder="Branch (CSE, ECE, ALL...)" 
-                value={newEvent.branch} 
-                onChange={e=>setNewEvent({...newEvent, branch:e.target.value})} 
-              />
-            </div>
-
-            <div className="space-y-4">
-               <div>
-                <label className="text-xs font-bold text-slate-400 uppercase mb-1 block">Logistics</label>
-                <input 
-                  className="w-full bg-gray-50 border border-gray-200 focus:border-indigo-500 rounded-xl px-4 py-3 outline-none"
-                  placeholder="Date" 
-                  value={newEvent.date} 
-                  onChange={e=>setNewEvent({...newEvent, date:e.target.value})} 
-                />
-              </div>
-              <input 
-                className="w-full bg-gray-50 border border-gray-200 focus:border-indigo-500 rounded-xl px-4 py-3 outline-none"
-                placeholder="Time" 
-                value={newEvent.time} 
-                onChange={e=>setNewEvent({...newEvent, time:e.target.value})} 
-              />
-              <input 
-                className="w-full bg-gray-50 border border-gray-200 focus:border-indigo-500 rounded-xl px-4 py-3 outline-none"
-                placeholder="Venue" 
-                value={newEvent.venue} 
-                onChange={e=>setNewEvent({...newEvent, venue:e.target.value})} 
-              />
-              
-              <button 
-                onClick={editId ? updateEvent : addEvent}
-                className="w-full py-4 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl shadow-lg shadow-indigo-200 transition-all active:scale-95"
-              >
-                {editId ? "Save Changes" : "Post Event"}
-              </button>
-            </div>
-          </div>
-        </section>
-
-        {/* List Section */}
-        <section className="space-y-6">
-          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-gray-200 pb-6">
-            <h3 className="text-2xl font-bold">Event Directory</h3>
-            <div className="relative">
-              <input 
-                className="bg-white border border-gray-200 rounded-full px-10 py-2.5 outline-none focus:border-indigo-500 w-full md:w-72 shadow-sm"
-                placeholder="Search branch (e.g. CSE)" 
-                value={branch} 
-                onChange={e=>setBranch(e.target.value)} 
-              />
-              <span className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400">🔍</span>
-            </div>
-          </div>
-
-          {branch && filteredEvents.length === 0 && (
-            <div className="text-center py-12 bg-white rounded-3xl border border-gray-100">
-              <p className="text-gray-400">No events found for <span className="font-bold text-indigo-600">{branch.toUpperCase()}</span></p>
-            </div>
-          )}
-
-          <div className="grid grid-cols-1 gap-6">
-            {filteredEvents.map(ev => (
-              <div key={ev.id} className="bg-white border border-gray-200 rounded-3xl shadow-sm hover:shadow-md transition-shadow overflow-hidden">
-                <div className="p-6 md:p-8 flex flex-col md:flex-row md:items-center justify-between gap-6">
-                  <div className="flex-1 space-y-2">
-                    <span className="inline-block px-2 py-1 bg-indigo-50 text-indigo-700 text-[10px] font-black uppercase rounded border border-indigo-100">
-                      {ev.branch}
-                    </span>
-                    <h4 className="text-xl font-bold text-slate-800">{ev.title}</h4>
-                    <p className="text-slate-500 text-sm max-w-xl">{ev.description}</p>
-                    <div className="flex flex-wrap gap-4 text-sm font-medium text-slate-400 pt-2">
-                      <span className="flex items-center gap-1">📍 {ev.venue}</span>
-                      <span className="flex items-center gap-1">📅 {ev.date}</span>
-                      <span className="flex items-center gap-1">⏰ {ev.time}</span>
-                    </div>
-                  </div>
-
-                  <div className="flex flex-col gap-2 min-w-[160px]">
-                    <button 
-                      onClick={() => viewRegistrations(ev.id)} 
-                      className="px-4 py-2.5 bg-slate-900 text-white text-sm font-bold rounded-xl hover:bg-slate-800 transition-colors"
-                    >
-                      {loadingRegsFor === ev.id ? "..." : "View Attendees"}
-                    </button>
-                    <div className="flex gap-2">
-                      <button onClick={() => startEdit(ev)} className="flex-1 py-2 text-xs font-bold border border-gray-200 rounded-lg hover:bg-gray-50">Edit</button>
-                      <button onClick={() => deleteEvent(ev.id)} className="flex-1 py-2 text-xs font-bold border border-red-100 text-red-600 rounded-lg hover:bg-red-50">Delete</button>
-                    </div>
-                  </div>
+          {/* LEFT COLUMN: FORM */}
+          <div className="lg:col-span-1">
+            <section className="bg-white p-6 rounded-[2rem] shadow-sm border border-slate-200 sticky top-8">
+              <h2 className="text-xl font-bold mb-6 flex items-center gap-2">
+                {editId ? "📝 Update Event" : "✨ Create Event"}
+              </h2>
+              <form onSubmit={editId ? (e) => { e.preventDefault(); updateEvent(); } : addEvent} className="space-y-4">
+                <input name="title" placeholder="Event Title" value={newEvent.title} onChange={handleInputChange} className="w-full p-4 bg-slate-50 border rounded-2xl outline-indigo-600" />
+                <textarea name="description" placeholder="Description" value={newEvent.description} onChange={handleInputChange} className="w-full p-4 bg-slate-50 border rounded-2xl outline-indigo-600 h-32" />
+                <div className="grid grid-cols-2 gap-4">
+                  <input name="branch" placeholder="Branch (CSE/ALL)" value={newEvent.branch} onChange={handleInputChange} className="p-4 bg-slate-50 border rounded-2xl outline-indigo-600" />
+                  <input name="date" type="date" value={newEvent.date} onChange={handleInputChange} className="p-4 bg-slate-50 border rounded-2xl outline-indigo-600" />
                 </div>
-
-                {/* Registration List Dropdown */}
-                {registrationsMap[ev.id] && (
-                  <div className="bg-gray-50 border-t border-gray-100 p-6 animate-in slide-in-from-top-2 duration-300">
-                    <h5 className="text-xs font-black text-slate-400 uppercase mb-4 tracking-widest">Registrations</h5>
-                    {registrationsMap[ev.id].length > 0 ? (
-                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                        {registrationsMap[ev.id].map(r => (
-                          <div key={r.id} className="bg-white p-3 rounded-xl border border-gray-200 shadow-sm">
-                            <p className="text-sm font-bold text-slate-700 truncate">{r.userEmail || r.userId}</p>
-                            <div className="flex justify-between text-[10px] text-slate-400 mt-1 uppercase font-bold">
-                              <span>{r.branch || "N/A"}</span>
-                              <span>{r.createdAt?.toDate ? r.createdAt.toDate().toLocaleDateString() : 'Just now'}</span>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    ) : (
-                      <p className="text-sm text-slate-400 italic">No one has registered yet.</p>
-                    )}
-                  </div>
-                )}
-              </div>
-            ))}
+                <div className="grid grid-cols-2 gap-4">
+                  <input name="time" type="time" value={newEvent.time} onChange={handleInputChange} className="p-4 bg-slate-50 border rounded-2xl outline-indigo-600" />
+                  <input name="venue" placeholder="Venue" value={newEvent.venue} onChange={handleInputChange} className="p-4 bg-slate-50 border rounded-2xl outline-indigo-600" />
+                </div>
+                <button type="submit" className="w-full py-4 bg-indigo-600 text-white font-bold rounded-2xl shadow-lg shadow-indigo-100 hover:bg-indigo-700 transition-all">
+                  {editId ? "Save Changes" : "Create Event"}
+                </button>
+                {editId && <button onClick={resetForm} type="button" className="w-full py-2 text-slate-500 font-bold">Cancel Edit</button>}
+              </form>
+            </section>
           </div>
-        </section>
-      </main>
+
+          {/* RIGHT COLUMN: LISTS */}
+          <div className="lg:col-span-2 space-y-8">
+            
+            {/* STUDENTS LIST SECTION */}
+            <section className="bg-white p-6 rounded-[2rem] shadow-sm border border-slate-200">
+              <div className="flex justify-between items-start">
+                <div>
+                  <h2 className="text-xl font-bold">Verified Students</h2>
+                  {/* REQUESTED COMPONENT ADDED HERE */}
+                  <p className="text-sm text-slate-500 font-bold mt-2">
+                    Total Students: {students.length}
+                  </p>
+                </div>
+                <button
+                  onClick={() => { setShowStudents(!showStudents); if (!showStudents) fetchStudents(); }}
+                  className="px-4 py-2 bg-slate-900 text-white rounded-xl text-sm font-bold shadow-md active:scale-95 transition-transform"
+                >
+                  {showStudents ? "Close List" : "View All Students"}
+                </button>
+              </div>
+              
+              {showStudents && (
+                <div className="mt-6 overflow-hidden rounded-2xl border border-slate-100">
+                  {studentsLoading ? (
+                    <p className="p-10 text-center animate-pulse font-medium text-slate-400">Loading database...</p>
+                  ) : (
+                    <table className="w-full text-left border-collapse">
+                      <thead className="bg-slate-50 text-[10px] uppercase tracking-widest font-black text-slate-400">
+                        <tr>
+                          <th className="p-4 border-b border-slate-100">Student Email</th>
+                          <th className="p-4 border-b border-slate-100 text-right">Branch</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-50">
+                        {students.map(s => (
+                          <tr key={s.id} className="text-sm hover:bg-slate-50 transition-colors">
+                            <td className="p-4 font-bold text-slate-700">{s.email}</td>
+                            <td className="p-4 font-black text-indigo-500 text-right uppercase">{s.branch}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+              )}
+            </section>
+
+            {/* LIVE EVENTS LIST */}
+            <section className="space-y-4">
+              <div className="flex justify-between items-end px-2">
+                <h2 className="text-2xl font-black tracking-tight">Live Events</h2>
+                <select 
+                  onChange={(e) => setBranchFilter(e.target.value)}
+                  className="bg-transparent font-bold text-indigo-600 outline-none cursor-pointer"
+                >
+                  <option value="ALL">All Branches</option>
+                  <option value="CSE">CSE</option>
+                  <option value="ECE">ECE</option>
+                  <option value="ME">ME</option>
+                </select>
+              </div>
+
+              {loading ? (
+                <div className="h-40 bg-white rounded-[2rem] animate-pulse"></div>
+              ) : filteredEvents.map(ev => (
+                <div key={ev.id} className="bg-white p-6 rounded-[2rem] shadow-sm border border-slate-200 group hover:border-indigo-300 transition-all">
+                  <div className="flex justify-between items-start mb-4">
+                    <div>
+                      <span className="px-3 py-1 bg-indigo-50 text-indigo-600 text-[10px] font-black rounded-full uppercase tracking-tighter border border-indigo-100">
+                        {ev.branch}
+                      </span>
+                      <h3 className="text-xl font-bold mt-2 text-slate-800">{ev.title}</h3>
+                    </div>
+                    <div className="flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <button onClick={() => startEdit(ev)} className="p-2 bg-slate-50 hover:bg-indigo-50 text-slate-400 hover:text-indigo-600 rounded-lg transition-colors border border-transparent hover:border-indigo-100">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
+                      </button>
+                      <button onClick={() => deleteEvent(ev.id)} className="p-2 bg-slate-50 hover:bg-red-50 text-slate-400 hover:text-red-600 rounded-lg transition-colors border border-transparent hover:border-red-100">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+                      </button>
+                    </div>
+                  </div>
+                  
+                  <div className="flex gap-6 text-[11px] font-bold text-slate-400 mb-6 uppercase tracking-widest">
+                    <div className="flex items-center gap-1.5 underline decoration-indigo-200 decoration-2">📅 {ev.date}</div>
+                    <div className="flex items-center gap-1.5 underline decoration-indigo-200 decoration-2">📍 {ev.venue}</div>
+                  </div>
+
+                  <button 
+                    onClick={() => viewRegistrations(ev.id)}
+                    className={`w-full py-3 rounded-xl text-xs font-black uppercase tracking-widest transition-all ${
+                        registrationsMap[ev.id] 
+                        ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-100' 
+                        : 'bg-slate-50 text-slate-500 hover:bg-slate-100'
+                    }`}
+                  >
+                    {loadingRegsFor === ev.id ? "Syncing..." : registrationsMap[ev.id] ? "Hide Registrations" : "View Registrations"}
+                  </button>
+
+                  {registrationsMap[ev.id] && (
+                    <div className="mt-4 space-y-2 border-t border-slate-50 pt-4 animate-in fade-in duration-300">
+                      <div className="flex justify-between items-center mb-2 px-1">
+                        <p className="text-[10px] font-black text-indigo-500 uppercase tracking-tighter">Registration Log</p>
+                        <p className="text-[10px] font-black text-slate-400 uppercase tracking-tighter">{registrationsMap[ev.id].length} Total</p>
+                      </div>
+                      {registrationsMap[ev.id].length === 0 ? <p className="text-xs text-slate-400 text-center py-4 italic font-medium">No registrations yet for this event.</p> : 
+                        registrationsMap[ev.id].map(r => (
+                          <div key={r.id} className="flex justify-between items-center bg-slate-50/50 p-3 rounded-xl text-[13px] font-bold border border-slate-100 hover:bg-white hover:border-indigo-100 transition-colors">
+                            <span className="text-slate-700">{r.userEmail}</span>
+                            <span className="bg-white px-2 py-0.5 rounded-md text-indigo-600 border border-slate-100 shadow-sm text-[11px] uppercase tracking-tighter">{r.branch}</span>
+                          </div>
+                        ))
+                      }
+                    </div>
+                  )}
+                </div>
+              ))}
+              
+              {!loading && filteredEvents.length === 0 && (
+                <div className="text-center py-20 bg-white rounded-[2rem] border border-dashed border-slate-300 text-slate-400 font-bold italic">
+                  No events found for the {branchFilter} filter.
+                </div>
+              )}
+            </section>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
